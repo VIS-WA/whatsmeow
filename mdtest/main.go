@@ -14,7 +14,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -514,6 +513,52 @@ func handleCmd(cmd string, args []string) {
 		} else {
 			log.Infof("Group info: %+v", resp)
 		}
+	case "getgroupparticipants":
+		if len(args) < 1 {
+			log.Errorf("Usage: getgroupparticipants <jid>")
+			return
+		}
+		group, ok := parseJID(args[0])
+		if !ok {
+			return
+		} else if group.Server != types.GroupServer {
+			log.Errorf("Input must be a group JID (@%s)", types.GroupServer)
+			return
+		}
+		resp, err := cli.GetGroupInfo(group)
+		if err != nil {
+			log.Errorf("Failed to get group info: %v", err)
+		} else {
+			var participantJID []string
+			// extract the jid of each participant
+			for _, participant := range resp.Participants {
+				// store the jid in an array
+				participantJID = append(participantJID, participant.JID.String())
+			}
+			// print the list of participants
+			log.Infof("Participants: %+v", participantJID)
+			// each participantJID is of format "number@server", so we split each index with @
+			var message string
+			// store all participants in a single string with @ in between
+			for i := 0; i < len(participantJID); i++ {
+				message = message + "@" + strings.Split(participantJID[i], "@")[0]
+			}
+			var msg = &waProto.Message{
+				ExtendedTextMessage: &waProto.ExtendedTextMessage{
+					Text: proto.String(message),
+					ContextInfo: &waProto.ContextInfo{
+						MentionedJid: participantJID,
+					},
+				},
+			}
+			resp, err := cli.SendMessage(context.Background(), group, msg)
+			if err != nil {
+				log.Errorf("Error sending mention message: %v", err)
+			} else {
+				log.Infof("Mention message sent, response: %v", resp)
+			}
+		}
+
 	case "subgroups":
 		if len(args) < 1 {
 			log.Errorf("Usage: subgroups <jid>")
@@ -1083,7 +1128,53 @@ func handler(rawEvt interface{}) {
 			metaParts = append(metaParts, "edit")
 		}
 
-		log.Infof("Received message %s from %s (%s): %+v", evt.Info.ID, evt.Info.SourceString(), strings.Join(metaParts, ", "), evt.Message)
+		// log.Infof("Received message %s from %s (%s): %+v", evt.Info.ID, evt.Info.SourceString(), strings.Join(metaParts, ", "), evt.Message)
+		// if the message is from a group and contains "@everyone", call getgroupparticipants function
+		// log.Infof("GroupJID: %s\n Message: %s", strings.Split(evt.Info.SourceString(), " ")[2], evt.Message.GetConversation())
+		if evt.Message.GetConversation() != "" {
+			// check if evt.Info.IsGroup is true and if the message contains "@everyone"
+
+			if evt.Info.IsGroup && strings.Contains(*evt.Message.Conversation, "@everyone") {
+				log.Infof("Sending mention message to group: %s", strings.Split(evt.Info.SourceString(), " ")[2])
+				group, ok := parseJID(strings.Split(evt.Info.SourceString(), " ")[2])
+				if !ok {
+					log.Errorf("Invalid JID")
+					return
+				}
+				resp, err := cli.GetGroupInfo(group)
+				if err != nil {
+					log.Errorf("Failed to get group info: %v", err)
+				} else {
+					var participantJID []string
+					// extract the jid of each participant
+					for _, participant := range resp.Participants {
+						// store the jid in an array
+						participantJID = append(participantJID, participant.JID.String())
+					}
+					// print the list of participants
+					// log.Infof("Participants: %+v", participantJID)
+					var message string
+					// store all participants in a single string with @ in between
+					for i := 0; i < len(participantJID); i++ {
+						message = message + "@" + strings.Split(participantJID[i], "@")[0]
+					}
+					var msg = &waProto.Message{
+						ExtendedTextMessage: &waProto.ExtendedTextMessage{
+							Text: proto.String(message),
+							ContextInfo: &waProto.ContextInfo{
+								MentionedJid: participantJID,
+							},
+						},
+					}
+					resp, err := cli.SendMessage(context.Background(), group, msg)
+					if err != nil {
+						log.Errorf("Error sending mention message: %v", err)
+					} else {
+						log.Infof("Mention message sent, response: %v", resp)
+					}
+				}
+			}
+		}
 
 		if evt.Message.GetPollUpdateMessage() != nil {
 			decrypted, err := cli.DecryptPollVote(evt)
@@ -1104,28 +1195,28 @@ func handler(rawEvt interface{}) {
 			}
 		}
 
-		img := evt.Message.GetImageMessage()
-		if img != nil {
-			data, err := cli.Download(img)
-			if err != nil {
-				log.Errorf("Failed to download image: %v", err)
-				return
-			}
-			exts, _ := mime.ExtensionsByType(img.GetMimetype())
-			path := fmt.Sprintf("%s%s", evt.Info.ID, exts[0])
-			err = os.WriteFile(path, data, 0600)
-			if err != nil {
-				log.Errorf("Failed to save image: %v", err)
-				return
-			}
-			log.Infof("Saved image in message to %s", path)
-		}
+		// img := evt.Message.GetImageMessage()
+		// if img != nil {
+		// 	data, err := cli.Download(img)
+		// 	if err != nil {
+		// 		log.Errorf("Failed to download image: %v", err)
+		// 		return
+		// 	}
+		// 	exts, _ := mime.ExtensionsByType(img.GetMimetype())
+		// 	path := fmt.Sprintf("%s%s", evt.Info.ID, exts[0])
+		// 	err = os.WriteFile(path, data, 0600)
+		// 	if err != nil {
+		// 		log.Errorf("Failed to save image: %v", err)
+		// 		return
+		// 	}
+		// 	log.Infof("Saved image in message to %s", path)
+		// }
 	case *events.Receipt:
-		if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
-			log.Infof("%v was read by %s at %s", evt.MessageIDs, evt.SourceString(), evt.Timestamp)
-		} else if evt.Type == types.ReceiptTypeDelivered {
-			log.Infof("%s was delivered to %s at %s", evt.MessageIDs[0], evt.SourceString(), evt.Timestamp)
-		}
+		// if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
+		// 	log.Infof("%v was read by %s at %s", evt.MessageIDs, evt.SourceString(), evt.Timestamp)
+		// } else if evt.Type == types.ReceiptTypeDelivered {
+		// 	log.Infof("%s was delivered to %s at %s", evt.MessageIDs[0], evt.SourceString(), evt.Timestamp)
+		// }
 	case *events.Presence:
 		if evt.Unavailable {
 			if evt.LastSeen.IsZero() {
